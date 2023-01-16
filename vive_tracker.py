@@ -1,12 +1,3 @@
-"""
-pyopenxr example program vive_tracker.py
-
-Prints the position and orientation of your vive trackers each frame.
-
-Helpful instructions for getting trackers working on Linux are at
-https://gist.github.com/DanielArnett/c9a56c9c7cc0def20648480bca1f6772
-The udev symbolic link trick was crucial in my case.
-"""
 
 import ctypes
 from ctypes import cast, byref
@@ -65,6 +56,7 @@ with xr.ContextObject(
         enabled_extension_names=[
             # A graphics extension is mandatory (without a headless extension)
             xr.KHR_OPENGL_ENABLE_EXTENSION_NAME,
+            #xr.MND_HEADLESS_EXTENSION_NAME,   #not working at the moment
             xr.extension.HTCX_vive_tracker_interaction.NAME,
         ],
     ),

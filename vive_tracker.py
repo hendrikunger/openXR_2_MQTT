@@ -3,31 +3,77 @@ import ctypes
 from ctypes import cast, byref
 import time
 import xr
+import math
+from typing import List
 from pynput import keyboard
 import paho.mqtt.client as mqtt
+import json
+import pickle
+import os
 
 mqtt_broker = "broker.hivemq.com"
 #mqtt_broker = "10.54.129.47"
-MQTT_BASE_TOPIC ="EDF/BP/"
+MQTT_BASE_TOPIC ="EDF/BP/machines/"
 
 
 keep_going = True
+calibrate = False
+
+class Math(object):
+    class Pose(object):
+        @staticmethod
+        def identity():
+            t = xr.Posef()
+            assert t.orientation.w == 1
+            return t
+
+        @staticmethod
+        def translation(translation: List[float]):
+            t = Math.Pose.identity()
+            t.position[:] = translation[:]
+            return t
+
+        @staticmethod
+        def rotate_ccw_about_y_axis(radians: float, translation: List[float]):
+            t = Math.Pose.identity()
+            t.orientation.x = 0
+            t.orientation.y = math.sin(radians * 0.5)
+            t.orientation.z = 0
+            t.orientation.w = math.cos(radians * 0.5)
+            t.position[:] = translation[:]
+            return t
+
 
 #Detect Keys (for exit)
 def on_press(key):
     global keep_going
-    if key == keyboard.Key.esc:
-        keep_going = False
-        print("Stopping")
+    global calibrate
     try:
+        if key.char == "c":
+            print("Calibrating Position")
+            calibrate = True
+            return
+        if key.char == "l":
+            path = os.path.realpath(os.path.dirname(__file__))
+            with open( path+"/cal.p", "rb" ) as f:
+                cal = pickle.load(f)
+                print(cal, type(cal))
+            return
+
         print('alphanumeric key {0} pressed'.format(key.char))
 
     except AttributeError:
+        if key == keyboard.Key.esc:
+            keep_going = False
+            print("Stopping")
+            return
+
         print('special key {0} pressed'.format(
             key))
 
 listener = keyboard.Listener(on_press=on_press)
 listener.start()
+
 
 #MQTT Stuff
 # The callback for when the client receives a CONNACK response from the server.
@@ -44,7 +90,7 @@ def on_message(client, userdata, msg):
 mqtt_client = mqtt.Client()
 
 
-mqtt_client = mqtt.Client(client_id="factorySimLive")
+mqtt_client = mqtt.Client(client_id="Tracker")
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 mqtt_client.connect(mqtt_broker, 1883)
@@ -127,6 +173,7 @@ with xr.ContextObject(
             create_info=xr.ActionSpaceCreateInfo(
                 action=pose_action,
                 subaction_path=role_path,
+                pose_in_action_space= xr.Posef(), ### TODO Position of Actions Space set to calibration
             )
         ) for role_path in role_paths],
     )
@@ -179,9 +226,19 @@ with xr.ContextObject(
                     time=frame_state.predicted_display_time,
                 )
                 if space_location.location_flags & xr.SPACE_LOCATION_POSITION_VALID_BIT:
-                    output = f"{role_strings[index]}: {space_location.pose}"
-                    print(output)
-                    mqtt_client.publish(MQTT_BASE_TOPIC+"Tracking", payload=output, qos=0, retain=False)
+                    output = f"{role_strings[index]}: {space_location.pose.position},"
+                    if calibrate and index == 1:
+                        path = os.path.realpath(os.path.dirname(__file__))
+                        with open( path+"/cal.p", "wb" ) as f:
+                            pickle.dump(space_location.pose,  f)
+                        calibrate = False
+                        print("Calibration finished. Please Restart")
+
+                    pos = space_location.pose.position
+                    #Switch of y and z is intentional
+                    output = json.dumps({"x":pos.x * 1000 , "y": pos.z * 1000, "z": pos.y * 1000})
+                    index="0Eqz09Em50ZgMSsOvwCNok"
+                    mqtt_client.publish(MQTT_BASE_TOPIC+f"{index}/pos", payload=output, qos=0, retain=False)
                     found_tracker_count += 1
             if found_tracker_count == 0:
                 print("no trackers found")

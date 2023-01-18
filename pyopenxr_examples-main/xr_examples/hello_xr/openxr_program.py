@@ -511,6 +511,7 @@ class OpenXRProgram(object):
             session=self.session,
             create_info=get_xr_reference_space_create_info(self.options.app_space),
         )
+        
 
     def initialize_system(self) -> None:
         """

@@ -1,11 +1,10 @@
-
+from pynput import keyboard
 import ctypes
 from ctypes import cast, byref
 import time
 import xr
 import math
 from typing import List
-from pynput import keyboard
 import paho.mqtt.client as mqtt
 import json
 import pickle
@@ -201,7 +200,17 @@ with xr.ContextObject(
     #calpos.position = xr.Vector3f(0.0,0.0,0.0)    #x=z/y=x/z=y
     calpos = xr.Posef()
     print(calpos)
-    
+
+    pos1 = cal.get("waist", xr.Posef()).position
+    pos2 = cal.get("chest", xr.Posef()).position
+
+    u_distance = abs(pos2.x - pos1.x)
+    v_distance = abs(pos2.z - pos1.z)
+    w_distance = abs(pos2.y - pos1.y)
+    angle = np.arctan2(pos2.z - pos1.z, pos2.x - pos1.x)
+    rotationmatrix = np.array([[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]])
+    print(np.rad2deg(angle))
+    print(rotationmatrix)
 
     # Create action spaces for locating trackers in each role
     tracker_action_spaces = (xr.Space * len(role_paths))(
@@ -228,7 +237,6 @@ with xr.ContextObject(
     print(xr.Result(result), n_paths.value)
 
     calibration_dict ={"waist": None, "chest": None}
-    calroot = cal.get("waist", xr.Posef()).position
 
     # Loop over the render frames
     for frame_index, frame_state in enumerate(context.frame_loop()):
@@ -251,12 +259,10 @@ with xr.ContextObject(
             if xr.check_result(result).is_exception():
                 raise result
             vive_tracker_paths = (xr.ViveTrackerPathsHTCX * n_paths.value)(*([xr.ViveTrackerPathsHTCX()] * n_paths.value))
-            # print(xr.Result(result), n_paths.value)
             result = enumerateViveTrackerPathsHTCX(instance, n_paths, byref(n_paths), vive_tracker_paths)
             if xr.check_result(result).is_exception():
                 raise result
-            # print(xr.Result(result), n_paths.value)
-            # print(*vive_tracker_paths)
+
 
             found_tracker_count = 0
             for index, space in enumerate(tracker_action_spaces):
@@ -270,13 +276,12 @@ with xr.ContextObject(
                     xr_quad = space_location.pose.orientation
                     quad = np.quaternion(xr_quad.w,xr_quad.x,xr_quad.y,xr_quad.z)
 
-                    transformed = np.array([space_location.pose.position.x - calroot.x, space_location.pose.position.z - calroot.z])
-
+                    translated = np.array([space_location.pose.position.x - pos1.x, space_location.pose.position.z - pos1.z])
+                    rotated = np.matmul(rotationmatrix, translated)
 
                     output2=quaternion.as_euler_angles(quad)
                     output3 = np.rad2deg(np.arctan2(space_location.pose.position.z, space_location.pose.position.x)) # Winkel der neuen x Achse in Bezug auf die alte x Achse
-                    print(output, output3 ,np.rad2deg(output2))
-                    print(transformed) #TODO das muss gedreht werdenum output 3
+                    print(output, translated, rotated)
 
 
 

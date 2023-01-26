@@ -10,6 +10,8 @@ import paho.mqtt.client as mqtt
 import json
 import pickle
 import os
+import numpy as np
+import quaternion
 
 mqtt_broker = "broker.hivemq.com"
 #mqtt_broker = "10.54.129.47"
@@ -18,6 +20,7 @@ MQTT_BASE_TOPIC ="EDF/BP/machines/"
 
 keep_going = True
 calibrate = False
+calibration_dict = {}
 
 class Math(object):
     class Pose(object):
@@ -42,22 +45,28 @@ class Math(object):
             t.orientation.w = math.cos(radians * 0.5)
             t.position[:] = translation[:]
             return t
+        
 
 
 #Detect Keys (for exit)
 def on_press(key):
     global keep_going
     global calibrate
+    global calibration_dict
     try:
         if key.char == "c":
             print("Calibrating Position")
             calibrate = True
+            calibration_dict = {}
             return
-        if key.char == "l":
-            path = os.path.realpath(os.path.dirname(__file__))
-            with open( path+"/cal.p", "rb" ) as f:
-                cal = pickle.load(f)
-                print(cal, type(cal))
+        if key.char == "l":     
+            path = os.path.join(os.path.realpath(os.path.dirname(__file__)),"cal.p")
+            if os.path.isfile(path):
+                with open(path, "rb" ) as f:
+                    cal = pickle.load(f)
+                    print(cal, type(cal))
+            else:
+                print("No calibration file found")
             return
 
         print('alphanumeric key {0} pressed'.format(key.char))
@@ -81,11 +90,14 @@ def on_connect(client, userdata, flags, rc):
     print("Connected with result code "+str(rc))
     # Subscribing in on_connect() means that if we lose the connection and
     # reconnect then subscriptions will be renewed.
-    client.subscribe("EDF/BP/#")
+    client.subscribe("EDF/BP/cmd")
 
 # The callback for when a PUBLISH message is received from the server.
 def on_message(client, userdata, msg):
-    print(msg.topic+" "+str(msg.payload))
+    global calibrate
+    #print(msg.topic+" "+str(msg.payload))
+    calibrate = True
+    pass
 
 mqtt_client = mqtt.Client()
 
@@ -118,6 +130,8 @@ with xr.ContextObject(
         ),
         xr.PFN_xrEnumerateViveTrackerPathsHTCX
     )
+
+
 
     # Create the action with subaction path
     # Role strings from
@@ -166,6 +180,29 @@ with xr.ContextObject(
             suggested_bindings=suggested_binding_paths,
         )
     )
+
+    #Load calibration
+    cal={}
+    path = os.path.join(os.path.realpath(os.path.dirname(__file__)),"cal.p")
+    if os.path.isfile(path):
+        with open(path, "rb" ) as f:
+            cal = pickle.load(f)
+            #print(cal, type(cal))
+    else:
+        print("No calibration file found")
+
+    file = cal.get("waist", xr.Posef())
+    file_translation = file.position
+
+    calpos =  Math.Pose.translation([file.position.z,file.position.x,file.position.y]) 
+    
+    calpos.position = xr.Vector3f(0.0, -file.position.x, file.position.y)
+    #calpos.orientation = file.orientation  #xr.Quaternionf(0.0, 0.0, 0.0, 1.0)
+    #calpos.position = xr.Vector3f(0.0,0.0,0.0)    #x=z/y=x/z=y
+    calpos = xr.Posef()
+    print(calpos)
+    
+
     # Create action spaces for locating trackers in each role
     tracker_action_spaces = (xr.Space * len(role_paths))(
         *[xr.create_action_space(
@@ -173,10 +210,11 @@ with xr.ContextObject(
             create_info=xr.ActionSpaceCreateInfo(
                 action=pose_action,
                 subaction_path=role_path,
-                pose_in_action_space= xr.Posef(), ### TODO Position of Actions Space set to calibration
+                pose_in_action_space=  calpos #cal.get("waist", xr.Posef()), ### TODO Position of Actions Space set to calibration
             )
         ) for role_path in role_paths],
     )
+
 
     n_paths = ctypes.c_uint32(0)
     result = enumerateViveTrackerPathsHTCX(instance, 0, byref(n_paths), None)
@@ -188,7 +226,9 @@ with xr.ContextObject(
     if xr.check_result(result).is_exception():
         raise result
     print(xr.Result(result), n_paths.value)
-    # print(*vive_tracker_paths)
+
+    calibration_dict ={"waist": None, "chest": None}
+    calroot = cal.get("waist", xr.Posef()).position
 
     # Loop over the render frames
     for frame_index, frame_state in enumerate(context.frame_loop()):
@@ -227,24 +267,57 @@ with xr.ContextObject(
                 )
                 if space_location.location_flags & xr.SPACE_LOCATION_POSITION_VALID_BIT:
                     output = f"{role_strings[index]}: {space_location.pose.position},"
-                    if calibrate and index == 1:
-                        path = os.path.realpath(os.path.dirname(__file__))
-                        with open( path+"/cal.p", "wb" ) as f:
-                            pickle.dump(space_location.pose,  f)
-                        calibrate = False
-                        print("Calibration finished. Please Restart")
+                    xr_quad = space_location.pose.orientation
+                    quad = np.quaternion(xr_quad.w,xr_quad.x,xr_quad.y,xr_quad.z)
 
+                    transformed = np.array([space_location.pose.position.x - calroot.x, space_location.pose.position.z - calroot.z])
+
+
+                    output2=quaternion.as_euler_angles(quad)
+                    output3 = np.rad2deg(np.arctan2(space_location.pose.position.z, space_location.pose.position.x)) # Winkel der neuen x Achse in Bezug auf die alte x Achse
+                    print(output, output3 ,np.rad2deg(output2))
+                    print(transformed) #TODO das muss gedreht werdenum output 3
+
+
+
+                    if calibrate and (role_strings[index] == "waist" or role_strings[index] == "chest"):
+
+                        calibration_dict[role_strings[index]] = space_location.pose  #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)  
+                        print(f' calibration waist {calibration_dict.get("waist", "Nix")}')
+                        print(f' calibration chest {calibration_dict.get("chest", "Nix")}')
+            
+                        if  "waist" in calibration_dict and "chest" in calibration_dict:
+                            pos1 = calibration_dict["waist"].position
+                            pos2 = calibration_dict["chest"].position
+
+                            u_distance = abs(pos2.x - pos1.x)
+                            v_distance = abs(pos2.z - pos1.z)
+                            w_distance = abs(pos2.y - pos1.y)
+                            angle = np.rad2deg(np.arctan2(pos2.z - pos1.z, pos2.x - pos1.x))
+
+                            output = f" u: {u_distance}\n v: {v_distance}\n w: {w_distance}"
+                            output = f" winkel: {angle}\n pos2.x: {pos2.x}, pos1.x: {pos1.x}, dif: {abs(pos2.x - pos1.x)}\n pos2.z: {pos2.z}, pos1.z: {pos1.z}, dif: {abs(pos2.z - pos1.z)}"
+                            print(output)
+                            mqtt_client.publish(MQTT_BASE_TOPIC+"cal", payload=output, qos=0, retain=False)
+
+
+                            path = os.path.realpath(os.path.dirname(__file__))
+                            with open( path+"\cal.p", "wb" ) as f:
+                                pickle.dump(calibration_dict,  f)
+                            print("Calibration finished. Please Restart")
+                            calibrate = False
+                            
                     pos = space_location.pose.position
                     #Switch of y and z is intentional
-                    output = json.dumps({"x":pos.x * 1000 , "y": pos.z * 1000, "z": pos.y * 1000})
-                    index="0Eqz09Em50ZgMSsOvwCNok"
+                    output = json.dumps({"u":pos.x * 1000 , "w": pos.z * 1000, "v": pos.y * 1000})
                     mqtt_client.publish(MQTT_BASE_TOPIC+f"{index}/pos", payload=output, qos=0, retain=False)
                     found_tracker_count += 1
             if found_tracker_count == 0:
                 print("no trackers found")
 
+
         # Slow things down, especially since we are not rendering anything
-        time.sleep(0.5)
+        time.sleep(1.0)
         # Don't run forever
         if not keep_going:
             mqtt_client.loop_stop()

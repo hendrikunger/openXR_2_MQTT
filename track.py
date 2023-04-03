@@ -18,8 +18,8 @@ MQTT_BASE_TOPIC ="EDF/BP/machines/"
 
 
 keep_going = True
-calibrate = False
-calibration_dict = {}
+calibrate = [False,False,False]
+calibration_file_data = {"TopLeft": xr.Posef(), "TopRight": xr.Posef(), "BottomLeft": xr.Posef()}
 
 class Math(object):
     class Pose(object):
@@ -44,31 +44,50 @@ class Math(object):
             t.orientation.w = math.cos(radians * 0.5)
             t.position[:] = translation[:]
             return t
-        
+        123
 
 
 #Detect Keys (for exit)
 def on_press(key):
     global keep_going
     global calibrate
-    global calibration_dict
+    global calibration_file_data
     try:
+        if key.char == "1": #1 Key
+            if(not calibrate[1] and not calibrate[2]):
+                print("Calibrating TopLeft")
+                calibrate[0] = True # Calibrate TopLeft
+                calibration_file_data["TopLeft"] = xr.Posef()
+            return
+        if key.char == "2": #2 Key
+            if(not calibrate[0] and not calibrate[2]):
+                print("Calibrating TopRight")
+                calibrate[1] = True # Calibrate TopRight
+                calibration_file_data["TopRight"] = xr.Posef()
+            return
+        if key.char == "3": #3 Key
+            if(not calibrate[0] and not calibrate[1]):
+                print("Calibrating BottomLeft")
+                calibrate[2] = True # Calibrate BottomLeft
+                calibration_file_data["BottomLeft"] = xr.Posef()
+            return
+        
         if key.char == "c":
             print("Calibrating Position")
             calibrate = True
-            calibration_dict = {}
+            calibration_file_data = {}
             return
         if key.char == "l":     
-            path = os.path.join(os.path.realpath(os.path.dirname(__file__)),"cal.p")
+            path = os.path.join(os.path.realpath(os.path.dirname(__file__)),"cal.json")
             if os.path.isfile(path):
-                with open(path, "rb" ) as f:
+                with open(path, "r" ) as f:
                     cal = pickle.load(f)
                     print(cal, type(cal))
             else:
                 print("No calibration file found")
             return
 
-        print('alphanumeric key {0} pressed'.format(key.char))
+        #print('alphanumeric key {0} pressed'.format(key.char))
 
     except AttributeError:
         if key == keyboard.Key.esc:
@@ -106,6 +125,18 @@ mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 mqtt_client.connect(mqtt_broker, 1883)
 mqtt_client.loop_start()
+
+
+def recalculateTransforms(calibration_file_data, save=False):
+    calibration = None
+    if save:
+        path = os.path.realpath(os.path.dirname(__file__))
+        with open( path+"\cal.p", "wb" ) as f:
+            pickle.dump(calibration_file_data, f)
+        print("Saved Calibration File")
+    return calibration
+
+
 
 # ContextObject is a high level pythonic class meant to keep simple cases simple.
 with xr.ContextObject(
@@ -181,16 +212,17 @@ with xr.ContextObject(
     )
 
     #Load calibration
-    cal={}
     path = os.path.join(os.path.realpath(os.path.dirname(__file__)),"cal.p")
     if os.path.isfile(path):
         with open(path, "rb" ) as f:
-            cal = pickle.load(f)
-            #print(cal, type(cal))
+            calibration_file_data = pickle.load(f)
+            print(calibration_file_data, type(calibration_file_data))
     else:
         print("No calibration file found")
 
-    file = cal.get("waist", xr.Posef())
+    calibration = recalculateTransforms(calibration_file_data)
+
+    file = calibration_file_data.get("TopLeft", xr.Posef())
     file_translation = file.position
 
     calpos =  Math.Pose.translation([file.position.z,file.position.x,file.position.y]) 
@@ -209,7 +241,7 @@ with xr.ContextObject(
             create_info=xr.ActionSpaceCreateInfo(
                 action=pose_action,
                 subaction_path=role_path,
-                pose_in_action_space=  calpos #cal.get("waist", xr.Posef()), ### TODO Position of Actions Space set to calibration
+                #pose_in_action_space=xr.Posef()
             )
         ) for role_path in role_paths],
     )
@@ -226,9 +258,8 @@ with xr.ContextObject(
         raise result
 
 
-    calibration_dict ={"waist": None, "chest": None}
-    calroot = cal.get("waist", xr.Posef()).position
-    caltarget = cal.get("chest", xr.Posef()).position
+    calroot = calibration_file_data.get("TopLeft", xr.Posef()).position
+    caltarget = calibration_file_data.get("TopRight", xr.Posef()).position
     calangle =  - (np.arctan2(caltarget.z - calroot.z, caltarget.x - calroot.x)-np.pi/4)  # Vector between root and target - 45 degrees to get the angle of the x axis
     c, s = np.cos(calangle), np.sin(calangle)
     calRot = np.array(((c, -s), (s, c)))
@@ -281,42 +312,35 @@ with xr.ContextObject(
                     rotated = np.matmul(calRot, transformed)   
 
 
-                    #print(output)
-
-
                     #print(output, output3 ,np.rad2deg(output2))
                     #print(transformed) #TODO das muss gedreht werdenum output 3
                     print(f"{role_strings[index]}: {rotated}, {rotated/calmaxValues}, calmaxValues: {calmaxValues}")
 
 
 
-                    if calibrate and (role_strings[index] == "waist" or role_strings[index] == "chest"):
+                    if calibrate[0] and role_strings[index] == "chest":
+                        calibration_file_data["TopLeft"] = space_location.pose  #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)  
+                        print(f'calibration_file_data["TopLeft"]: {calibration_file_data["TopLeft"]}')
+                        calibrate[0] = False
+                        recalculateTransforms(calibration_file_data, save=True)
+                    if calibrate[1] and role_strings[index] == "chest":
+                        calibration_file_data["TopRight"] = space_location.pose #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)
+                        print(f'calibration_file_data["TopRight"]: {calibration_file_data["TopRight"]}')
+                        calibrate[1] = False
+                        recalculateTransforms(calibration_file_data, save=True)
+                    if calibrate[2] and role_strings[index] == "chest":
+                        calibration_file_data["BottomLeft"] = space_location.pose #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)
+                        print(f'calibration_file_data["BottomLeft"]: {calibration_file_data["BottomLeft"]}')
+                        calibrate[2] = False
+                        recalculateTransforms(calibration_file_data, save=True)
 
-                        calibration_dict[role_strings[index]] = space_location.pose  #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)  
-                        print(f' calibration waist {calibration_dict.get("waist", "Nix")}')
-                        print(f' calibration chest {calibration_dict.get("chest", "Nix")}')
-            
-                        if  "waist" in calibration_dict and "chest" in calibration_dict:
-                            pos1 = calibration_dict["waist"].position
-                            pos2 = calibration_dict["chest"].position
-
-
-                            print(f"pos1: {pos1}, pos2: {pos2}")
-                            mqtt_client.publish(MQTT_BASE_TOPIC+"cal", payload=output, qos=0, retain=False)
-
-
-                            path = os.path.realpath(os.path.dirname(__file__))
-                            with open( path+"\cal.p", "wb" ) as f:
-                                pickle.dump(calibration_dict,  f)
-                            print("Calibration finished. Please Restart")
-                            calibrate = False
-                            calibration_dict ={"waist": None, "chest": None}
                             
                     pos = space_location.pose.position
                     #Switch of y and z is intentional
                     output = json.dumps({"u":pos.x * 1000 , "w": pos.z * 1000, "v": pos.y * 1000})
                     mqtt_client.publish(MQTT_BASE_TOPIC+f"{index}/pos", payload=output, qos=0, retain=False)
                     found_tracker_count += 1
+                    
             if found_tracker_count == 0:
                 print("no trackers found")
 

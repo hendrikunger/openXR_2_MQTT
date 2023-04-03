@@ -1,11 +1,10 @@
-
+from pynput import keyboard
 import ctypes
 from ctypes import cast, byref
 import time
 import xr
 import math
 from typing import List
-from pynput import keyboard
 import paho.mqtt.client as mqtt
 import json
 import pickle
@@ -200,7 +199,17 @@ with xr.ContextObject(
     #calpos.position = xr.Vector3f(0.0,0.0,0.0)    #x=z/y=x/z=y
     calpos = xr.Posef()
     print(calpos)
-    
+
+    pos1 = cal.get("waist", xr.Posef()).position
+    pos2 = cal.get("chest", xr.Posef()).position
+
+    u_distance = abs(pos2.x - pos1.x)
+    v_distance = abs(pos2.z - pos1.z)
+    w_distance = abs(pos2.y - pos1.y)
+    angle = np.arctan2(pos2.z - pos1.z, pos2.x - pos1.x)
+    rotationmatrix = np.array([[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]])
+    print(np.rad2deg(angle))
+    print(rotationmatrix)
 
     # Create action spaces for locating trackers in each role
     tracker_action_spaces = (xr.Space * len(role_paths))(
@@ -258,12 +267,10 @@ with xr.ContextObject(
             if xr.check_result(result).is_exception():
                 raise result
             vive_tracker_paths = (xr.ViveTrackerPathsHTCX * n_paths.value)(*([xr.ViveTrackerPathsHTCX()] * n_paths.value))
-            # print(xr.Result(result), n_paths.value)
             result = enumerateViveTrackerPathsHTCX(instance, n_paths, byref(n_paths), vive_tracker_paths)
             if xr.check_result(result).is_exception():
                 raise result
-            # print(xr.Result(result), n_paths.value)
-            # print(*vive_tracker_paths)
+
 
             found_tracker_count = 0
             for index, space in enumerate(tracker_action_spaces):

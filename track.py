@@ -19,33 +19,8 @@ MQTT_BASE_TOPIC ="EDF/BP/machines/"
 
 keep_going = True
 calibrate = [False,False,False]
+global calibration_file_data
 calibration_file_data = {"TopLeft": xr.Posef(), "TopRight": xr.Posef(), "BottomLeft": xr.Posef()}
-
-class Math(object):
-    class Pose(object):
-        @staticmethod
-        def identity():
-            t = xr.Posef()
-            assert t.orientation.w == 1
-            return t
-
-        @staticmethod
-        def translation(translation: List[float]):
-            t = Math.Pose.identity()
-            t.position[:] = translation[:]
-            return t
-
-        @staticmethod
-        def rotate_ccw_about_y_axis(radians: float, translation: List[float]):
-            t = Math.Pose.identity()
-            t.orientation.x = 0
-            t.orientation.y = math.sin(radians * 0.5)
-            t.orientation.z = 0
-            t.orientation.w = math.cos(radians * 0.5)
-            t.position[:] = translation[:]
-            return t
-        123
-
 
 #Detect Keys (for exit)
 def on_press(key):
@@ -128,7 +103,25 @@ mqtt_client.loop_start()
 
 
 def recalculateTransforms(calibration_file_data, save=False):
-    calibration = None
+    '''Calculates new transformations to move from XR frame of reference to 2d world'''
+    pose = calibration_file_data["TopLeft"]
+    root = np.array([pose.position.x, pose.position.z])  #z is intentional
+    pose = calibration_file_data["TopRight"]
+    x_direction = np.array([pose.position.x, pose.position.z])  #z is intentional
+    pose = calibration_file_data["BottomLeft"]
+    y_direction = np.array([pose.position.x, pose.position.z])  #z is intentional
+    
+    width = np.sqrt(np.sum(np.power((x_direction-root),2)))
+    heigth = np.sqrt(np.sum(np.power((y_direction-root),2)))
+    #Holds maximum x and y value
+    dims = np.array([width, heigth])
+    
+    angle = -np.arctan2(x_direction[1] - root[1], x_direction[0] - root[0]) # Minus nicht vergessen
+
+    rotationmatrix = np.array([[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]])
+
+    calibration = {"translation": root, "rotation": rotationmatrix, "dims":dims}
+    print(f"\nNew Calibration {calibration}\n")    
     if save:
         path = os.path.realpath(os.path.dirname(__file__))
         with open( path+"\cal.p", "wb" ) as f:
@@ -136,6 +129,13 @@ def recalculateTransforms(calibration_file_data, save=False):
         print("Saved Calibration File")
     return calibration
 
+def transform(input, calibration):
+    '''Applies transformations to move from XR frame of reference to 2d world, returns np.array scaled between 0 and 1'''
+    input = np.array([input.position.x, input.position.z])  #z is intentional
+    translated = input - calibration["translation"]
+    rotated = np.matmul(calibration["rotation"], translated)
+    scaled = rotated / calibration["dims"]
+    return scaled
 
 
 # ContextObject is a high level pythonic class meant to keep simple cases simple.
@@ -216,23 +216,14 @@ with xr.ContextObject(
     if os.path.isfile(path):
         with open(path, "rb" ) as f:
             calibration_file_data = pickle.load(f)
-            print(calibration_file_data, type(calibration_file_data))
+            print(calibration_file_data)
     else:
+        #Calibration file data is identiy matrices
         print("No calibration file found")
 
     calibration = recalculateTransforms(calibration_file_data)
 
-    file = calibration_file_data.get("TopLeft", xr.Posef())
-    file_translation = file.position
-
-    calpos =  Math.Pose.translation([file.position.z,file.position.x,file.position.y]) 
-    
-    calpos.position = xr.Vector3f(0.0, -file.position.x, file.position.y)
-    #calpos.orientation = file.orientation  #xr.Quaternionf(0.0, 0.0, 0.0, 1.0)
-    #calpos.position = xr.Vector3f(0.0,0.0,0.0)    #x=z/y=x/z=y
-    calpos = xr.Posef()
-    print(calpos)
-    
+        
 
     # Create action spaces for locating trackers in each role
     tracker_action_spaces = (xr.Space * len(role_paths))(
@@ -256,16 +247,6 @@ with xr.ContextObject(
     result = enumerateViveTrackerPathsHTCX(instance, n_paths, byref(n_paths), vive_tracker_paths)
     if xr.check_result(result).is_exception():
         raise result
-
-
-    calroot = calibration_file_data.get("TopLeft", xr.Posef()).position
-    caltarget = calibration_file_data.get("TopRight", xr.Posef()).position
-    calangle =  - (np.arctan2(caltarget.z - calroot.z, caltarget.x - calroot.x)-np.pi/4)  # Vector between root and target - 45 degrees to get the angle of the x axis
-    c, s = np.cos(calangle), np.sin(calangle)
-    calRot = np.array(((c, -s), (s, c)))
-    calmaxValues = np.matmul(calRot, np.array([caltarget.x - calroot.x, (caltarget.z - calroot.z)])) 
-    print(f"x axis angle: {np.rad2deg(calangle)}")
-
  
 
     # Loop over the render frames
@@ -305,39 +286,31 @@ with xr.ContextObject(
                 )
                 if space_location.location_flags & xr.SPACE_LOCATION_POSITION_VALID_BIT:
                     output = f"{role_strings[index]}: {space_location.pose.position},"
-                    xr_quad = space_location.pose.orientation
+                    
+                    transformed = transform(space_location.pose, calibration) # output is np array (x,y) scaled between 0-1
 
-                    transformed = np.array([space_location.pose.position.x - calroot.x, (space_location.pose.position.z - calroot.z)])
-                    #rotate tranformed by calRot 
-                    rotated = np.matmul(calRot, transformed)   
-
-
-                    #print(output, output3 ,np.rad2deg(output2))
-                    #print(transformed) #TODO das muss gedreht werdenum output 3
-                    print(f"{role_strings[index]}: {rotated}, {rotated/calmaxValues}, calmaxValues: {calmaxValues}")
-
+                    print(f"{role_strings[index]}: {space_location.pose}")
 
 
                     if calibrate[0] and role_strings[index] == "chest":
                         calibration_file_data["TopLeft"] = space_location.pose  #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)  
                         print(f'calibration_file_data["TopLeft"]: {calibration_file_data["TopLeft"]}')
                         calibrate[0] = False
-                        recalculateTransforms(calibration_file_data, save=True)
+                        calibration = recalculateTransforms(calibration_file_data, save=True)
                     if calibrate[1] and role_strings[index] == "chest":
                         calibration_file_data["TopRight"] = space_location.pose #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)
                         print(f'calibration_file_data["TopRight"]: {calibration_file_data["TopRight"]}')
                         calibrate[1] = False
-                        recalculateTransforms(calibration_file_data, save=True)
+                        calibration = recalculateTransforms(calibration_file_data, save=True)
                     if calibrate[2] and role_strings[index] == "chest":
                         calibration_file_data["BottomLeft"] = space_location.pose #xr.Posef(orientation=Math.Pose.rotate_ccw_about_y_axis(0, [0.0,0.0,0.0]).orientation, position=space_location.pose.position)
                         print(f'calibration_file_data["BottomLeft"]: {calibration_file_data["BottomLeft"]}')
                         calibrate[2] = False
-                        recalculateTransforms(calibration_file_data, save=True)
-
+                        calibration = recalculateTransforms(calibration_file_data, save=True)
                             
-                    pos = space_location.pose.position
                     #Switch of y and z is intentional
-                    output = json.dumps({"u":pos.x * 1000 , "w": pos.z * 1000, "v": pos.y * 1000})
+                    output = json.dumps({"u":transformed[0], "v": transformed[1], "w": 0})
+                    print(index, output)
                     mqtt_client.publish(MQTT_BASE_TOPIC+f"{index}/pos", payload=output, qos=0, retain=False)
                     found_tracker_count += 1
                     

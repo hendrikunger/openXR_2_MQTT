@@ -3,8 +3,7 @@ import ctypes
 from ctypes import cast, byref
 import time
 import xr
-import math
-from typing import List
+
 from pynput import keyboard
 import paho.mqtt.client as mqtt
 import json
@@ -146,7 +145,79 @@ with xr.ContextObject(
 ) as context:
     instance = context.instance
     session = context.session
+#Controller------------------------------------------------------------------------------------------------
 
+
+    # Set up the controller pose action
+    controller_paths = (xr.Path * 2)(
+        xr.string_to_path(context.instance, "/user/hand/left"),
+        xr.string_to_path(context.instance, "/user/hand/right"),
+    )
+    controller_pose_action = xr.create_action(
+        action_set=context.default_action_set,
+        create_info=xr.ActionCreateInfo(
+            action_type=xr.ActionType.POSE_INPUT,
+            action_name="hand_pose",
+            localized_action_name="Hand Pose",
+            count_subaction_paths=len(controller_paths),
+            subaction_paths=controller_paths,
+        ),
+    )
+    trigger_action = xr.create_action(
+        action_set=context.default_action_set,
+        create_info=xr.ActionCreateInfo(
+            action_type=xr.ActionType.FLOAT_INPUT,
+            action_name="trigger",
+            localized_action_name="My Trigger Action",
+            count_subaction_paths=len(controller_paths),
+            subaction_paths=controller_paths,
+        ),
+    )
+
+    # Attach the actions to the input sources
+    suggested_bindings = [
+        xr.ActionSuggestedBinding(trigger_action, xr.string_to_path(instance, "/user/hand/left/input/trigger/value")),
+        xr.ActionSuggestedBinding(trigger_action, xr.string_to_path(instance, "/user/hand/right/input/trigger/value")),
+        xr.ActionSuggestedBinding(controller_pose_action, xr.string_to_path(instance, "/user/hand/left/input/grip/pose")),
+        xr.ActionSuggestedBinding(controller_pose_action, xr.string_to_path(instance, "/user/hand/right/input/grip/pose"))
+    ]
+
+
+    xr.suggest_interaction_profile_bindings(
+        instance=instance,
+        suggested_bindings=xr.InteractionProfileSuggestedBinding(
+            interaction_profile=xr.string_to_path(
+                instance,
+                "/interaction_profiles/htc/vive_controller",
+            ),
+            count_suggested_bindings=len(suggested_bindings),
+            suggested_bindings=(xr.ActionSuggestedBinding * len(suggested_bindings))(*suggested_bindings),
+        ),
+    )
+    
+
+    action_spaces = [
+        xr.create_action_space(
+            session=context.session,
+            create_info=xr.ActionSpaceCreateInfo(
+                action=controller_pose_action,
+                subaction_path=controller_paths[0],
+            ),
+        ),
+        xr.create_action_space(
+            session=context.session,
+            create_info=xr.ActionSpaceCreateInfo(
+                action=controller_pose_action,
+                subaction_path=controller_paths[1],
+            ),
+        ),
+    ]
+
+
+
+
+    
+#Tracker---------------------------------------------------------------------------------------------------
     # Save the function pointer
     enumerateViveTrackerPathsHTCX = cast(
         xr.get_instance_proc_addr(
@@ -155,7 +226,6 @@ with xr.ContextObject(
         ),
         xr.PFN_xrEnumerateViveTrackerPathsHTCX
     )
-
 
 
     # Create the action with subaction path
@@ -260,6 +330,36 @@ with xr.ContextObject(
                 ),
             )
 
+#Controller---------------------------------------------------------------------------------------------------
+            found_count = 0
+            for index, space in enumerate(action_spaces):
+                space_location = xr.locate_space(
+                    space=space,
+                    base_space=context.space,
+                    time=frame_state.predicted_display_time,
+                )
+                if space_location.location_flags & xr.SPACE_LOCATION_POSITION_VALID_BIT:
+                    print(f"Controller_{index + 1}, {space_location.pose}")
+                    found_count += 1
+            if found_count == 0:
+                print("no controllers active")
+
+
+            for path in controller_paths:
+
+                trigger_data = xr.get_action_state_float(
+                    session,
+                    xr.ActionStateGetInfo(
+                        action=trigger_action,
+                        subaction_path=path,
+                    ),
+                )
+                if trigger_data.is_active:                
+                    print(f'Trigger state: {trigger_data.current_state}')
+ 
+
+
+#Tracker---------------------------------------------------------------------------------------------------
             n_paths = ctypes.c_uint32(0)
             result = enumerateViveTrackerPathsHTCX(instance, 0, byref(n_paths), None)
             if xr.check_result(result).is_exception():
@@ -305,7 +405,7 @@ with xr.ContextObject(
                             
                     #Switch of y and z is intentional
                     output = json.dumps({"u":transformed[0], "v": transformed[1], "w": 0})
-                    print(index, output)
+                    #print(index, output)
                     mqtt_client.publish(MQTT_BASE_TOPIC+f"{index}/pos", payload=output, qos=0, retain=False)
                     found_tracker_count += 1
                     

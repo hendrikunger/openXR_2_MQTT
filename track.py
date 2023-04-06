@@ -47,11 +47,6 @@ def on_press(key):
                 calibration_file_data["BottomLeft"] = xr.Posef()
             return
         
-        if key.char == "c":
-            print("Calibrating Position")
-            calibrate = True
-            calibration_file_data = {}
-            return
         if key.char == "l":     
             path = os.path.join(os.path.realpath(os.path.dirname(__file__)),"cal.json")
             if os.path.isfile(path):
